@@ -15,6 +15,7 @@ from collections.abc import Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.ticker import PercentFormatter
 from scipy import sparse
 from sklearn import svm
 from sklearn.base import ClassifierMixin
@@ -53,6 +54,7 @@ class DAgger:
         }
         self.labels: dict[int, list[int]] = {fold: [] for fold in range(10)}
         self._initial_dataset_built = False
+        self.last_structured_bc_score: float | None = None
 
     @staticmethod
     def _paper_svm() -> svm.SVC:
@@ -281,6 +283,7 @@ class DAgger:
         policies.append(policy)
         score = self.evaluate_policy(policy, test_fold)
         scores.append(score)
+        self.last_structured_bc_score = score
         print(f"Iteration 1/{N}: free-running character accuracy = {score:.4f}")
 
         # Iterations 2..N: collect under pi_i, aggregate, and retrain.
@@ -303,27 +306,68 @@ class DAgger:
 
         final_scores = np.asarray(scores)
         if plot:
-            self.plot_scores(final_scores, test_fold=test_fold)
+            self.plot_scores(
+                final_scores,
+                supervised_score=final_scores[0],
+                test_fold=test_fold,
+            )
         return final_scores, policies
 
     @staticmethod
-    def plot_scores(scores: np.ndarray, *, test_fold: int | None = None) -> None:
-        """Plot DAgger against its behavior-cloning starting policy."""
+    def plot_scores(
+        scores: np.ndarray,
+        *,
+        supervised_score: float,
+        test_fold: int | None = None,
+        dagger_confidence: np.ndarray | None = None,
+        supervised_confidence: float | None = None,
+    ) -> None:
+        """Plot DAgger against its structured behavior-cloning baseline."""
         iterations = np.arange(1, len(scores) + 1)
-        supervised_baseline = np.full(len(scores), scores[0])
+        supervised_baseline = np.full(len(scores), supervised_score)
 
-        plt.plot(iterations, scores, marker="o", label="DAgger")
-        plt.plot(
+        _, axis = plt.subplots()
+        axis.plot(
+            iterations, scores, color="C0", marker="o", label="DAgger"
+        )
+        if dagger_confidence is not None:
+            axis.fill_between(
+                iterations,
+                scores - dagger_confidence,
+                scores + dagger_confidence,
+                color="C0",
+                alpha=0.2,
+                label="DAgger 95% CI",
+            )
+        axis.plot(
             iterations,
             supervised_baseline,
+            color="C1",
             linestyle="--",
-            label="Supervised (iteration 1)",
+            label="Structured BC",
         )
-        plt.ylabel("Free-running character accuracy")
-        plt.xlabel("Training iteration")
+        if supervised_confidence is not None:
+            axis.fill_between(
+                iterations,
+                supervised_baseline - supervised_confidence,
+                supervised_baseline + supervised_confidence,
+                color="C1",
+                alpha=0.12,
+            )
+
+        y_label = (
+            "Mean character accuracy"
+            if test_fold is None
+            else "Character accuracy"
+        )
+        axis.set_ylabel(y_label)
+        axis.set_xlabel("DAgger iteration")
+        axis.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
+        axis.set_xticks(iterations)
+        axis.grid(alpha=0.2)
         title_suffix = "" if test_fold is None else f" (test fold {test_fold})"
-        plt.title(f"Stanford OCR DAgger{title_suffix}")
-        plt.legend()
+        axis.set_title(f"Stanford OCR: DAgger vs. structured BC{title_suffix}")
+        axis.legend()
         plt.tight_layout()
         plt.show()
 
@@ -336,6 +380,7 @@ class DAgger:
     ) -> np.ndarray:
         """Run the paper's large-data protocol, holding out every fold once."""
         fold_scores = []
+        structured_bc_scores = []
         for test_fold in range(10):
             print(f"\n=== Test fold {test_fold} ===")
             scores, _ = self.run(
@@ -345,12 +390,29 @@ class DAgger:
                 plot=False,
             )
             fold_scores.append(scores)
+            structured_bc_scores.append(scores[0])
 
         all_scores = np.vstack(fold_scores)
         mean_scores = all_scores.mean(axis=0)
+        structured_bc_scores_array = np.asarray(structured_bc_scores)
+        confidence_scale = 1.96 / np.sqrt(all_scores.shape[0])
+        dagger_confidence = all_scores.std(axis=0, ddof=1) * confidence_scale
+        structured_confidence = (
+            structured_bc_scores_array.std(ddof=1) * confidence_scale
+        )
+
         print(f"Mean final accuracy across folds: {mean_scores[-1]:.4f}")
+        print(
+            "Mean structured BC accuracy across folds: "
+            f"{structured_bc_scores_array.mean():.4f}"
+        )
         if plot:
-            self.plot_scores(mean_scores)
+            self.plot_scores(
+                mean_scores,
+                supervised_score=float(structured_bc_scores_array.mean()),
+                dagger_confidence=dagger_confidence,
+                supervised_confidence=float(structured_confidence),
+            )
         return all_scores
 
 
