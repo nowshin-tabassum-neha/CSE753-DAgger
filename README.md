@@ -1,0 +1,1 @@
+Implementation of DAgger on Stanford OCR Dataset. Lets work!
