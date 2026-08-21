@@ -10,9 +10,10 @@ executed letter prediction. DAgger labels every state visited during a complete
 left-to-right rollout with the ground-truth letter, aggregates those examples,
 and retrains a linear SVM.
 
-The generated plot compares DAgger with its structured behavior-cloning
-baseline (the iteration-1 policy trained on expert trajectories). Ten-fold runs
-show mean accuracy with 95% confidence bands.
+The generated plot compares DAgger with structured behavior cloning (the
+iteration-1 policy trained on expert trajectories) and an independent
+no-structure supervised model that uses only the 128 image pixels. Ten-fold
+runs show mean accuracy with 95% confidence bands.
 
 Run one held-out fold with the paper's 20 iterations and
 `beta_i = I(i=1)` schedule:

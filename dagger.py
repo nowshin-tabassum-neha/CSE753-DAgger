@@ -55,6 +55,8 @@ class DAgger:
         self.labels: dict[int, list[int]] = {fold: [] for fold in range(10)}
         self._initial_dataset_built = False
         self.last_structured_bc_score: float | None = None
+        self.last_no_structure_score: float | None = None
+        self.last_no_structure_policy: ClassifierMixin | None = None
 
     @staticmethod
     def _paper_svm() -> svm.SVC:
@@ -202,6 +204,26 @@ class DAgger:
         policy.fit(sparse.vstack(states, format="csr"), np.asarray(expert_actions))
         return policy
 
+    def _fit_no_structure_policy(
+        self, states: list[sparse.csr_matrix], expert_actions: list[int]
+    ) -> ClassifierMixin:
+        """Train an independent-character SVM using only the 128 pixels."""
+        pixel_features = sparse.vstack(states, format="csr")[:, :NUM_PIXELS]
+        policy = self.policy_factory()
+        policy.fit(pixel_features, np.asarray(expert_actions))
+        return policy
+
+    def evaluate_no_structure_policy(
+        self, policy: ClassifierMixin, test_fold: int = 9
+    ) -> float:
+        """Evaluate characters independently, without previous-letter context."""
+        test_states = self.dataset[test_fold]
+        if not test_states:
+            raise ValueError(f"Test fold {test_fold} contains no characters.")
+        pixel_features = sparse.vstack(test_states, format="csr")[:, :NUM_PIXELS]
+        predictions = policy.predict(pixel_features)
+        return float(accuracy_score(self.labels[test_fold], predictions))
+
     def evaluate_policy(
         self, policy: ClassifierMixin, test_fold: int = 9
     ) -> float:
@@ -278,6 +300,20 @@ class DAgger:
         policies: list[ClassifierMixin] = []
         scores: list[float] = []
 
+        # No-structure baseline: every character is predicted independently.
+        no_structure_policy = self._fit_no_structure_policy(
+            aggregated_data[0], aggregated_data[1]
+        )
+        no_structure_score = self.evaluate_no_structure_policy(
+            no_structure_policy, test_fold
+        )
+        self.last_no_structure_policy = no_structure_policy
+        self.last_no_structure_score = no_structure_score
+        print(
+            "No-structure supervised character accuracy = "
+            f"{no_structure_score:.4f}"
+        )
+
         # Iteration 1: train on expert trajectories (behavior cloning).
         policy = self._fit_policy(aggregated_data[0], aggregated_data[1])
         policies.append(policy)
@@ -309,6 +345,7 @@ class DAgger:
             self.plot_scores(
                 final_scores,
                 supervised_score=final_scores[0],
+                no_structure_score=no_structure_score,
                 test_fold=test_fold,
             )
         return final_scores, policies
@@ -318,13 +355,16 @@ class DAgger:
         scores: np.ndarray,
         *,
         supervised_score: float,
+        no_structure_score: float,
         test_fold: int | None = None,
         dagger_confidence: np.ndarray | None = None,
         supervised_confidence: float | None = None,
+        no_structure_confidence: float | None = None,
     ) -> None:
-        """Plot DAgger against its structured behavior-cloning baseline."""
+        """Plot DAgger, structured BC, and no-structure supervision."""
         iterations = np.arange(1, len(scores) + 1)
         supervised_baseline = np.full(len(scores), supervised_score)
+        no_structure_baseline = np.full(len(scores), no_structure_score)
 
         _, axis = plt.subplots()
         axis.plot(
@@ -346,12 +386,27 @@ class DAgger:
             linestyle="--",
             label="Structured BC",
         )
+        axis.plot(
+            iterations,
+            no_structure_baseline,
+            color="C2",
+            linestyle=":",
+            label="No-structure supervised",
+        )
         if supervised_confidence is not None:
             axis.fill_between(
                 iterations,
                 supervised_baseline - supervised_confidence,
                 supervised_baseline + supervised_confidence,
                 color="C1",
+                alpha=0.12,
+            )
+        if no_structure_confidence is not None:
+            axis.fill_between(
+                iterations,
+                no_structure_baseline - no_structure_confidence,
+                no_structure_baseline + no_structure_confidence,
+                color="C2",
                 alpha=0.12,
             )
 
@@ -366,7 +421,7 @@ class DAgger:
         axis.set_xticks(iterations)
         axis.grid(alpha=0.2)
         title_suffix = "" if test_fold is None else f" (test fold {test_fold})"
-        axis.set_title(f"Stanford OCR: DAgger vs. structured BC{title_suffix}")
+        axis.set_title(f"Stanford OCR: DAgger vs. supervised baselines{title_suffix}")
         axis.legend()
         plt.tight_layout()
         plt.show()
@@ -381,6 +436,7 @@ class DAgger:
         """Run the paper's large-data protocol, holding out every fold once."""
         fold_scores = []
         structured_bc_scores = []
+        no_structure_scores = []
         for test_fold in range(10):
             print(f"\n=== Test fold {test_fold} ===")
             scores, _ = self.run(
@@ -391,14 +447,21 @@ class DAgger:
             )
             fold_scores.append(scores)
             structured_bc_scores.append(scores[0])
+            if self.last_no_structure_score is None:
+                raise RuntimeError("No-structure baseline was not evaluated.")
+            no_structure_scores.append(self.last_no_structure_score)
 
         all_scores = np.vstack(fold_scores)
         mean_scores = all_scores.mean(axis=0)
         structured_bc_scores_array = np.asarray(structured_bc_scores)
+        no_structure_scores_array = np.asarray(no_structure_scores)
         confidence_scale = 1.96 / np.sqrt(all_scores.shape[0])
         dagger_confidence = all_scores.std(axis=0, ddof=1) * confidence_scale
         structured_confidence = (
             structured_bc_scores_array.std(ddof=1) * confidence_scale
+        )
+        no_structure_confidence = (
+            no_structure_scores_array.std(ddof=1) * confidence_scale
         )
 
         print(f"Mean final accuracy across folds: {mean_scores[-1]:.4f}")
@@ -406,12 +469,18 @@ class DAgger:
             "Mean structured BC accuracy across folds: "
             f"{structured_bc_scores_array.mean():.4f}"
         )
+        print(
+            "Mean no-structure accuracy across folds: "
+            f"{no_structure_scores_array.mean():.4f}"
+        )
         if plot:
             self.plot_scores(
                 mean_scores,
                 supervised_score=float(structured_bc_scores_array.mean()),
+                no_structure_score=float(no_structure_scores_array.mean()),
                 dagger_confidence=dagger_confidence,
                 supervised_confidence=float(structured_confidence),
+                no_structure_confidence=float(no_structure_confidence),
             )
         return all_scores
 
