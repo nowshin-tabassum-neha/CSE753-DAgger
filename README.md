@@ -144,9 +144,9 @@ probability scores, not calibrated guarantees; choose them on validation data.
 Example matched five-iteration experiments (seed 0, 10,000 additional labels):
 
 ```powershell
-python dagger.py --alpha 0.00001 --iterations 5 --seed 0 --query-strategy standard --query-budget 10000 --output-dir results/budget_standard
-python dagger.py --alpha 0.00001 --iterations 5 --seed 0 --query-strategy uncertainty --uncertainty-threshold 0.5 --query-budget 10000 --output-dir results/budget_uncertainty
-python dagger.py --alpha 0.00001 --iterations 5 --seed 0 --query-strategy periodic --query-period 10 --query-budget 10000 --output-dir results/budget_periodic
+python label_budget_dagger.py --alpha 0.00001 --iterations 5 --seed 0 --query-strategy standard --query-budget 10000 --output-dir results/budget_standard
+python label_budget_dagger.py --alpha 0.00001 --iterations 5 --seed 0 --query-strategy uncertainty --uncertainty-threshold 0.5 --query-budget 10000 --output-dir results/budget_uncertainty
+python label_budget_dagger.py --alpha 0.00001 --iterations 5 --seed 0 --query-strategy periodic --query-period 10 --query-budget 10000 --output-dir results/budget_periodic
 ```
 
 These display a plot after each run; add `--no-plot` to disable it. Repeat the
@@ -154,3 +154,20 @@ same commands with seeds 1 and 2 when ready. Config files record strategy,
 budget, period, and threshold. Metrics include remaining budget and visited
 state counts as well as expert queries. Blank budget fields mean unlimited.
 Validate the implementation with `python -m unittest test_baselines test_queries`.
+
+
+## Separate study scripts
+
+`dagger.py` runs BC, independent-character supervision and unrestricted DAgger.
+`label_budget_dagger.py` adds budgets and standard/uncertainty/periodic querying.
+`ablation_retention.py` runs the retention ablation; `tune_alpha.py` tunes the baseline.
+Budget flags now belong only to `label_budget_dagger.py`. Examples:
+
+```powershell
+python label_budget_dagger.py --alpha 0.00001 --iterations 5 --seed 0 --query-strategy uncertainty --query-budget 10000 --output-dir results/budget_uncertainty
+python dagger.py --alpha 0.00001 --iterations 5 --seed 0
+```
+
+Existing result files need no rerun. Both scripts save metrics and display plots
+unless `--no-plot` is supplied. Baseline query counts still record all expert
+labels; selective decisions and budget enforcement live in the budget script.
