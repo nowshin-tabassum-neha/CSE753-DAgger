@@ -66,6 +66,7 @@ class DAgger:
         }
         self.labels: dict[int, list[int]] = {fold: [] for fold in range(10)}
         self._initial_dataset_built = False
+        self.last_rollout_queries = 0
         self.last_structured_bc_score: float | None = None
         self.last_no_structure_score: float | None = None
         self.last_no_structure_policy: ClassifierMixin | None = None
@@ -162,53 +163,77 @@ class DAgger:
 
         self._initial_dataset_built = True
 
+    @staticmethod
+    def _validate_queries(strategy, budget, period, threshold, beta):
+        if strategy not in ("standard", "uncertainty", "periodic"):
+            raise ValueError("Unknown query strategy.")
+        if budget is not None and (not isinstance(budget, int) or budget < 0):
+            raise ValueError("Query budget must be a nonnegative integer or None.")
+        if not isinstance(period, int) or period < 1:
+            raise ValueError("Query period must be a positive integer.")
+        if not 0 <= threshold <= 1:
+            raise ValueError("Uncertainty threshold must be in [0, 1].")
+        if not 0 <= beta <= 1:
+            raise ValueError("beta must be in [0, 1].")
+        if beta != 0 and (strategy != "standard" or budget is not None):
+            raise ValueError("Budgeted/selective querying requires beta_decay=0 to avoid uncounted expert actions.")
+
     def aggregate_dataset(
-        self,
-        policy: ClassifierMixin,
-        aggregated_data: list[list],
-        test_fold: int = 9,
-        *,
-        beta: float = 0.0,
+        self, policy: ClassifierMixin, aggregated_data: list[list],
+        test_fold: int = 9, *, beta: float = 0.0,
         excluded_folds: tuple[int, ...] = (),
+        query_strategy: str = "standard", query_budget: int | None = None,
+        query_period: int = 10, uncertainty_threshold: float = 0.5,
+        visited_offset: int = 0,
     ) -> list[list]:
-        """Roll out the mixture policy and aggregate expert-labelled states.
+        """Collect selected expert labels; query_budget is the remaining allowance.
 
-        At every visited state, the ground-truth OCR label supplies pi*(s).
-        The action that affects the next state is selected from the expert with
-        probability ``beta`` and from the learner with probability ``1-beta``.
+        Periodic queries select every kth training state across rollouts (1-based).
+        Decisions use learner observations/probabilities before accessing labels.
+        All words are rolled out even when no queries remain.
         """
-        if not 0.0 <= beta <= 1.0:
-            raise ValueError("beta must be between 0 and 1.")
-
-        new_states: list[sparse.csr_matrix] = []
-        new_expert_actions: list[int] = []
-
+        self._validate_queries(query_strategy, query_budget, query_period,
+                               uncertainty_threshold, beta)
+        if query_strategy == "uncertainty" and not callable(getattr(policy, "predict_proba", None)):
+            raise ValueError("Uncertainty querying requires predict_proba (SGD loss='log_loss').")
+        self.last_rollout_queries = 0
+        self.last_rollout_visited = 0
+        new_states, new_actions = [], []
         for word_index, images in enumerate(self.words):
             if self.words_fold[word_index] in (test_fold, *excluded_folds):
                 continue
-
-            expert_actions = self.sequences[word_index]
-            previous_executed_action: int | None = None
-
-            # This is a complete left-to-right trajectory. Crucially, the
-            # selected action at t becomes the context in state t+1.
-            for image, expert_action in zip(images, expert_actions):
-                state = self.make_state(image, previous_executed_action)
-                new_states.append(state)
-                new_expert_actions.append(expert_action)
-
+            previous_action = None
+            for position, image in enumerate(images):
+                state = self.make_state(image, previous_action)
+                self.last_rollout_visited += 1
+                available = query_budget is None or self.last_rollout_queries < query_budget
+                query = False
+                if available:
+                    if query_strategy == "standard":
+                        query = True
+                    elif query_strategy == "periodic":
+                        query = (visited_offset + self.last_rollout_visited) % query_period == 0
+                    else:
+                        probabilities = np.asarray(policy.predict_proba(state)[0], dtype=float)
+                        if (not np.all(np.isfinite(probabilities)) or
+                                np.any(probabilities < 0) or np.any(probabilities > 1) or
+                                not np.isclose(probabilities.sum(), 1)):
+                            raise ValueError("predict_proba must return finite normalized probabilities.")
+                        query = 1.0 - float(probabilities.max()) >= uncertainty_threshold
+                if query:
+                    expert_action = self.sequences[word_index][position]
+                    new_states.append(state)
+                    new_actions.append(expert_action)
+                    self.last_rollout_queries += 1
+                # Mixture actions are supported only for unrestricted standard DAgger.
                 if self.rng.random() < beta:
-                    executed_action = expert_action
+                    previous_action = expert_action
                 else:
-                    executed_action = int(policy.predict(state)[0])
-                previous_executed_action = executed_action
-
+                    previous_action = int(policy.predict(state)[0])
         aggregated_data[0].extend(new_states)
-        aggregated_data[1].extend(new_expert_actions)
-        print(
-            f"Aggregated {len(new_states)} states; "
-            f"dataset now has {len(aggregated_data[0])} examples"
-        )
+        aggregated_data[1].extend(new_actions)
+        print(f"Visited {self.last_rollout_visited} states; queried {self.last_rollout_queries}; "
+              f"dataset now has {len(aggregated_data[0])} examples")
         return aggregated_data
 
     def _fit_policy(
@@ -273,6 +298,10 @@ class DAgger:
         output_dir: str | Path = "results",
         excluded_folds: tuple[int, ...] = (),
         evaluation_role: str = "test",
+        query_strategy: str = "standard",
+        query_budget: int | None = None,
+        query_period: int = 10,
+        uncertainty_threshold: float = 0.5,
     ) -> tuple[np.ndarray, list[ClassifierMixin]]:
         """Run matched baselines and DAgger; checkpoint metrics after each fit.
 
@@ -280,6 +309,10 @@ class DAgger:
         excluded_folds are never used for training or aggregation, allowing
         a final test fold to remain untouched during validation runs.
         """
+        self._validate_queries(query_strategy, query_budget, query_period,
+                               uncertainty_threshold, beta_decay)
+        if query_strategy == "uncertainty" and not callable(getattr(self.policy_factory(), "predict_proba", None)):
+            raise ValueError("Uncertainty querying requires predict_proba.")
         if N < 1 or test_fold not in range(10):
             raise ValueError("N must be positive and test_fold must be in 0..9.")
         if not 0 <= beta_decay <= 1:
@@ -297,15 +330,25 @@ class DAgger:
         if not states or not self.dataset[test_fold]:
             raise ValueError("Training and evaluation folds must contain characters.")
         aggregated_data = [list(states), list(actions)]
+        visited_states = 0
+        self.last_rollout_visited = 0
+        initial_labels = len(actions)
+        cumulative_queries = 0
+        queries_this_iteration = 0
+        self.last_rollout_queries = 0
         run_dir = Path(output_dir) / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
         run_dir.mkdir(parents=True, exist_ok=False)
         self.last_run_dir = run_dir
         config = {
             "status": "running", "seed": self.random_state,
             "iterations": N, "beta_decay": beta_decay,
+            "query_strategy": query_strategy, "query_budget": query_budget,
+            "query_period": query_period, "uncertainty_threshold": uncertainty_threshold,
+            "query_order": "dataset order; periodic index continues across rollouts",
             "train_folds": train_folds, "evaluation_fold": test_fold,
             "evaluation_role": evaluation_role, "excluded_folds": list(excluded_folds),
             "initial_dataset_size": len(states),
+            "label_accounting": "Simulated expert requests, including repeated characters; initial training labels shared by baselines. Evaluation labels excluded. Mixed expert actions reuse the queried label.",
             "evaluation_characters": len(self.labels[test_fold]),
             "classifier": type(self.policy_factory()).__name__,
             "classifier_params": self.policy_factory().get_params(),
@@ -326,6 +369,15 @@ class DAgger:
             row = dict(method=method, iteration=iteration, beta=beta,
                        accuracy=score, imitation_error=1-score,
                        dataset_size=len(aggregated_data[0]), seed=self.random_state,
+                       query_strategy=query_strategy,
+                       query_budget=query_budget,
+                       remaining_queries=None if query_budget is None else query_budget-cumulative_queries,
+                       visited_states_this_iteration=self.last_rollout_visited,
+                       cumulative_visited_states=visited_states,
+                       initial_labels=initial_labels,
+                       queries_this_iteration=queries_this_iteration,
+                       cumulative_queries=cumulative_queries,
+                       total_labels_used=initial_labels+cumulative_queries,
                        evaluation_fold=test_fold, training_seconds=training,
                        rollout_seconds=rollout, evaluation_seconds=evaluation,
                        elapsed_seconds=perf_counter()-started)
@@ -335,7 +387,9 @@ class DAgger:
                 if len(records) == 1:
                     writer.writeheader()
                 writer.writerow(row)
-            print(f"{method} iteration {iteration}: accuracy={score:.4f}, train={training:.2f}s, rollout={rollout:.2f}s")
+            print(f"{method} iteration {iteration}: accuracy={score:.4f}, train={training:.2f}s, rollout={rollout:.2f}s, "
+                  f"new queries={queries_this_iteration}, cumulative queries={cumulative_queries}, "
+                  f"total labels={initial_labels+cumulative_queries}")
         t = perf_counter()
         baseline = self._fit_no_structure_policy(states, actions)
         training = perf_counter()-t
@@ -348,13 +402,22 @@ class DAgger:
         for iteration in range(1, N+1):
             beta = 1.0 if iteration == 1 else beta_decay ** (iteration-1)
             rollout = 0.0
+            queries_this_iteration = 0
             if iteration > 1:
                 t = perf_counter()
                 self.aggregate_dataset(policies[-1], aggregated_data, test_fold,
-                                       beta=beta, excluded_folds=excluded_folds)
+                                       beta=beta, excluded_folds=excluded_folds,
+                                       query_strategy=query_strategy,
+                                       query_budget=None if query_budget is None else query_budget-cumulative_queries,
+                                       query_period=query_period, uncertainty_threshold=uncertainty_threshold,
+                                       visited_offset=visited_states)
                 rollout = perf_counter()-t
+                queries_this_iteration = self.last_rollout_queries
+                cumulative_queries += queries_this_iteration
+                visited_states += self.last_rollout_visited
             t = perf_counter()
-            policy = self._fit_policy(*aggregated_data)
+            policy = (self._fit_policy(*aggregated_data)
+                      if iteration == 1 or queries_this_iteration else policies[-1])
             training = perf_counter()-t
             t = perf_counter()
             score = self.evaluate_policy(policy, test_fold)
@@ -456,6 +519,10 @@ class DAgger:
         beta_decay: float = 0.0,
         plot: bool = True,
         output_dir: str | Path = "results",
+        query_strategy: str = "standard",
+        query_budget: int | None = None,
+        query_period: int = 10,
+        uncertainty_threshold: float = 0.5,
     ) -> np.ndarray:
         """Run the paper's large-data protocol, holding out every fold once."""
         fold_scores = []
@@ -469,6 +536,8 @@ class DAgger:
                 beta_decay=beta_decay,
                 plot=False,
                 output_dir=output_dir,
+                query_strategy=query_strategy, query_budget=query_budget,
+                query_period=query_period, uncertainty_threshold=uncertainty_threshold,
             )
             fold_scores.append(scores)
             structured_bc_scores.append(scores[0])
@@ -530,6 +599,10 @@ def parse_args() -> argparse.Namespace:
             "as used for the paper's OCR DAgger result."
         ),
     )
+    parser.add_argument("--query-strategy", choices=["standard", "uncertainty", "periodic"], default="standard")
+    parser.add_argument("--query-budget", type=int, help="Maximum additional expert queries across the entire run; initial labels excluded.")
+    parser.add_argument("--query-period", type=int, default=10, help="Query every kth training state across rollouts.")
+    parser.add_argument("--uncertainty-threshold", type=float, default=0.5, help="Query if 1-max(predict_proba) >= threshold.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--alpha", type=float, default=1e-4)
     parser.add_argument("--output-dir", default="results")
@@ -552,6 +625,8 @@ if __name__ == "__main__":
             beta_decay=args.beta_decay,
             plot=not args.no_plot,
             output_dir=args.output_dir,
+            query_strategy=args.query_strategy, query_budget=args.query_budget,
+            query_period=args.query_period, uncertainty_threshold=args.uncertainty_threshold,
         )
     else:
         scores, trained_policies = dagger.run(
@@ -562,4 +637,6 @@ if __name__ == "__main__":
             beta_decay=args.beta_decay,
             plot=not args.no_plot,
             output_dir=args.output_dir,
+            query_strategy=args.query_strategy, query_budget=args.query_budget,
+            query_period=args.query_period, uncertainty_threshold=args.uncertainty_threshold,
         )

@@ -91,4 +91,66 @@ and evaluate on fold 9. Repeat with `--seed 0`, `--seed 1`, and `--seed 2`.
 Do not choose settings from test scores. For unbiased tuning during ten-fold
 cross-validation, repeat validation selection within each outer training split;
 `--all-folds` itself evaluates a fixed alpha and does not do nested tuning.
-Label budgeting and selective querying are not implemented in this step.
+See the querying strategies below for budgeted experiments.
+
+
+## Expert-query accounting
+
+New runs include four label-use columns in `metrics.csv` and print query totals:
+
+- `initial_labels`: training character labels in the initial expert dataset.
+- `queries_this_iteration`: expert requests during the current rollout (zero for both baselines).
+- `cumulative_queries`: additional requests across completed rollouts in this run.
+- `total_labels_used`: initial labels plus cumulative queries.
+
+These count simulated expert requests, not unique characters. Repeated visits
+count again. Both baselines share the initial labels; their totals should not
+be added together. Test/validation labels used for scoring are excluded. When
+beta selects an expert action, the already queried label is reused without a
+second charge. Counters reset for every run, including every cross-validation fold.
+
+Standard DAgger still queries every visited training state. For fold 9, iteration
+1 uses 47,010 initial labels and zero additional queries; iteration 5 reaches
+188,040 additional queries and 235,050 total labels. Budgets and selective querying are available through the options below. Existing saved results are left unchanged;
+new columns appear in new runs. No retraining of the existing baselines is required.
+
+
+## Label-budgeted querying (step 3)
+
+`--query-budget` limits **additional** labels across the whole run, excluding
+initial demonstrations. Omit it for unlimited queries; zero retains BC with no
+additional labels. The budget resets for each seed/run and each outer test fold.
+
+- `--query-strategy standard`: query every visited state until the budget ends.
+- `--query-strategy uncertainty`: query when `1 - max(predict_proba(state))`
+  is at least `--uncertainty-threshold` (default 0.5). This requires a classifier
+  with probabilities, such as the current SGD log-loss model.
+- `--query-strategy periodic`: query every `--query-period`th training state
+  (default 10), starting at state k. The count continues across words and rollouts.
+
+Selection occurs before reading the expert target. Only queried states are
+added. All training words are still rolled out after the budget is exhausted;
+if an iteration collects no new labels, its previous policy is reused and
+reevaluated instead of refitted. Initial training labels and held-out scoring
+labels are still loaded normally. Query restriction applies to new rollout labels.
+
+Budgeted or selective runs require `--beta-decay 0` (the default). Nonzero mixing
+remains available only for unlimited standard querying. Word order is unchanged
+across strategies. Standard querying may spend its entire budget early; the
+uncertainty threshold or periodic interval can leave budget unused. Compare
+actual cumulative queries, not only the allowed budget. Thresholds are heuristic
+probability scores, not calibrated guarantees; choose them on validation data.
+
+Example matched five-iteration experiments (seed 0, 10,000 additional labels):
+
+```powershell
+python dagger.py --alpha 0.00001 --iterations 5 --seed 0 --query-strategy standard --query-budget 10000 --output-dir results/budget_standard
+python dagger.py --alpha 0.00001 --iterations 5 --seed 0 --query-strategy uncertainty --uncertainty-threshold 0.5 --query-budget 10000 --output-dir results/budget_uncertainty
+python dagger.py --alpha 0.00001 --iterations 5 --seed 0 --query-strategy periodic --query-period 10 --query-budget 10000 --output-dir results/budget_periodic
+```
+
+These display a plot after each run; add `--no-plot` to disable it. Repeat the
+same commands with seeds 1 and 2 when ready. Config files record strategy,
+budget, period, and threshold. Metrics include remaining budget and visited
+state counts as well as expert queries. Blank budget fields mean unlimited.
+Validate the implementation with `python -m unittest test_baselines test_queries`.
