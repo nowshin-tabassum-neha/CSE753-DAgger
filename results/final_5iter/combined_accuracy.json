@@ -1,0 +1,13 @@
+{
+  "source_runs": [
+    "results\\final_5iter\\20260911T115000_347918Z",
+    "results\\final_5iter\\20260911T115611_120400Z",
+    "results\\final_5iter\\20260911T120911_849805Z"
+  ],
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "band": "sample standard deviation across seeds, not a confidence interval"
+}
