@@ -8,7 +8,13 @@ Each word is a trajectory. At character position `t`, the policy observes the
 128 image pixels and a 26-dimensional one-hot encoding of its previously
 executed letter prediction. DAgger labels every state visited during a complete
 left-to-right rollout with the ground-truth letter, aggregates those examples,
-and retrains a linear SVM.
+and retrains a linear classifier using scikit-learn's `SGDClassifier` with
+`loss="log_loss"`, `alpha=1e-4`, `average=True`, `max_iter=1000`, and
+`tol=1e-3`. The classifier uses the DAgger random seed (default 0).
+Both supervised baselines use the same classifier. Each DAgger iteration
+fits a fresh classifier on the full aggregated dataset. These are starting
+parameters, not tuned settings; runtime and accuracy should be measured
+against the previous SVC and LinearSVC implementations.
 
 The generated plot compares DAgger with structured behavior cloning (the
 iteration-1 policy trained on expert trajectories) and an independent
@@ -34,5 +40,7 @@ For a quick non-plotting check:
 python dagger.py --iterations 1 --test-fold 9 --no-plot
 ```
 
-The linear kernel SVM and full 20-iteration, ten-fold experiment are
-computationally expensive.
+The full 20-iteration, ten-fold experiment can still be computationally
+expensive as the aggregated training dataset grows. The scores in
+`update_results_graph.py` are historical results from the original SVC run;
+rerun training to obtain results for `SGDClassifier`.

@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.ticker import PercentFormatter
 from scipy import sparse
-from sklearn import svm
+from sklearn.linear_model import SGDClassifier
 from sklearn.base import ClassifierMixin
 from sklearn.metrics import accuracy_score
 
@@ -41,7 +41,7 @@ class DAgger:
         self.ocr_path = os.path.join("Dataset", str(ocr_path))
         self.random_state = random_state
         self.rng = np.random.default_rng(random_state)
-        self.policy_factory = policy_factory or self._paper_svm
+        self.policy_factory = policy_factory or self._sgd_classifier
 
         # These three lists share the same word index.
         self.words: list[list[np.ndarray]] = []
@@ -58,14 +58,15 @@ class DAgger:
         self.last_no_structure_score: float | None = None
         self.last_no_structure_policy: ClassifierMixin | None = None
 
-    @staticmethod
-    def _paper_svm() -> svm.SVC:
-        """Return a linear one-vs-one SVM, matching the paper's base learner."""
-        return svm.SVC(
-            C=10,
-            kernel="linear",
-            decision_function_shape="ovo",
-            cache_size=2000,
+    def _sgd_classifier(self) -> SGDClassifier:
+        """Return a reproducible SGD logistic classifier for DAgger and baselines."""
+        return SGDClassifier(
+            loss="log_loss",
+            alpha=1e-4,
+            average=True,
+            max_iter=1000,
+            tol=1e-3,
+            random_state=self.random_state,
         )
 
     @staticmethod
@@ -207,7 +208,7 @@ class DAgger:
     def _fit_no_structure_policy(
         self, states: list[sparse.csr_matrix], expert_actions: list[int]
     ) -> ClassifierMixin:
-        """Train an independent-character SVM using only the 128 pixels."""
+        """Train an independent-character classifier using only the 128 pixels."""
         pixel_features = sparse.vstack(states, format="csr")[:, :NUM_PIXELS]
         policy = self.policy_factory()
         policy.fit(pixel_features, np.asarray(expert_actions))
