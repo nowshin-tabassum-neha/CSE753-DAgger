@@ -9,6 +9,14 @@ action is the ground-truth character at the current position.
 from __future__ import annotations
 
 import argparse
+import csv
+import hashlib
+import json
+import platform
+from datetime import datetime, timezone
+from pathlib import Path
+from time import perf_counter
+import sklearn
 import os.path
 import string
 from collections.abc import Callable
@@ -36,8 +44,12 @@ class DAgger:
         ocr_path: str = "letter.data",
         *,
         random_state: int = 0,
+        alpha: float = 1e-4,
         policy_factory: Callable[[], ClassifierMixin] | None = None,
     ) -> None:
+        if not np.isfinite(alpha) or alpha <= 0:
+            raise ValueError("alpha must be finite and positive.")
+        self.alpha = alpha
         self.ocr_path = os.path.join("Dataset", str(ocr_path))
         self.random_state = random_state
         self.rng = np.random.default_rng(random_state)
@@ -62,7 +74,7 @@ class DAgger:
         """Return a reproducible SGD logistic classifier for DAgger and baselines."""
         return SGDClassifier(
             loss="log_loss",
-            alpha=1e-4,
+            alpha=self.alpha,
             average=True,
             max_iter=1000,
             tol=1e-3,
@@ -157,6 +169,7 @@ class DAgger:
         test_fold: int = 9,
         *,
         beta: float = 0.0,
+        excluded_folds: tuple[int, ...] = (),
     ) -> list[list]:
         """Roll out the mixture policy and aggregate expert-labelled states.
 
@@ -171,7 +184,7 @@ class DAgger:
         new_expert_actions: list[int] = []
 
         for word_index, images in enumerate(self.words):
-            if self.words_fold[word_index] == test_fold:
+            if self.words_fold[word_index] in (test_fold, *excluded_folds):
                 continue
 
             expert_actions = self.sequences[word_index]
@@ -257,98 +270,107 @@ class DAgger:
         test_fold: int = 9,
         beta_decay: float = 0.0,
         plot: bool = True,
+        output_dir: str | Path = "results",
+        excluded_folds: tuple[int, ...] = (),
+        evaluation_role: str = "test",
     ) -> tuple[np.ndarray, list[ClassifierMixin]]:
-        """Run DAgger on one held-out fold.
+        """Run matched baselines and DAgger; checkpoint metrics after each fit.
 
-        ``beta_decay=0`` gives the paper's parameter-free schedule
-        beta_i = I(i=1): the first dataset is expert-controlled and every later
-        rollout is learner-controlled. For p in (0, 1], iteration i instead
-        uses beta_i = p**(i-1).
+        Iteration 1 is structured BC. Later rollouts use beta_decay**(i-1).
+        excluded_folds are never used for training or aggregation, allowing
+        a final test fold to remain untouched during validation runs.
         """
-        if N < 1:
-            raise ValueError("N must be at least 1.")
-        if test_fold not in range(10):
-            raise ValueError("test_fold must be in 0..9.")
-        if not 0.0 <= beta_decay <= 1.0:
+        if N < 1 or test_fold not in range(10):
+            raise ValueError("N must be positive and test_fold must be in 0..9.")
+        if not 0 <= beta_decay <= 1:
             raise ValueError("beta_decay must be between 0 and 1.")
-
+        if any(f not in range(10) for f in excluded_folds):
+            raise ValueError("Excluded folds must be in 0..9.")
+        train_folds = [f for f in range(10) if f not in (test_fold, *excluded_folds)]
+        if not train_folds:
+            raise ValueError("At least one training fold is required.")
+        started = perf_counter()
         self.build_initial_dataset()
         self.rng = np.random.default_rng(self.random_state)
-
-        train_states = sum(
-            (
-                self.dataset[fold]
-                for fold in range(10)
-                if fold != test_fold
-            ),
-            [],
-        )
-        train_actions = sum(
-            (
-                self.labels[fold]
-                for fold in range(10)
-                if fold != test_fold
-            ),
-            [],
-        )
-        aggregated_data: list[list] = [list(train_states), list(train_actions)]
-
-        print(
-            f"Training on folds other than {test_fold}; "
-            f"initial dataset has {len(train_states)} examples"
-        )
-
-        policies: list[ClassifierMixin] = []
-        scores: list[float] = []
-
-        # No-structure baseline: every character is predicted independently.
-        no_structure_policy = self._fit_no_structure_policy(
-            aggregated_data[0], aggregated_data[1]
-        )
-        no_structure_score = self.evaluate_no_structure_policy(
-            no_structure_policy, test_fold
-        )
-        self.last_no_structure_policy = no_structure_policy
-        self.last_no_structure_score = no_structure_score
-        print(
-            "No-structure supervised character accuracy = "
-            f"{no_structure_score:.4f}"
-        )
-
-        # Iteration 1: train on expert trajectories (behavior cloning).
-        policy = self._fit_policy(aggregated_data[0], aggregated_data[1])
-        policies.append(policy)
-        score = self.evaluate_policy(policy, test_fold)
-        scores.append(score)
-        self.last_structured_bc_score = score
-        print(f"Iteration 1/{N}: free-running character accuracy = {score:.4f}")
-
-        # Iterations 2..N: collect under pi_i, aggregate, and retrain.
-        for iteration in range(2, N + 1):
-            beta = beta_decay ** (iteration - 1)
-            self.aggregate_dataset(
-                policy,
-                aggregated_data,
-                test_fold,
-                beta=beta,
-            )
-            policy = self._fit_policy(aggregated_data[0], aggregated_data[1])
-            policies.append(policy)
+        states = [s for f in train_folds for s in self.dataset[f]]
+        actions = [y for f in train_folds for y in self.labels[f]]
+        if not states or not self.dataset[test_fold]:
+            raise ValueError("Training and evaluation folds must contain characters.")
+        aggregated_data = [list(states), list(actions)]
+        run_dir = Path(output_dir) / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+        run_dir.mkdir(parents=True, exist_ok=False)
+        self.last_run_dir = run_dir
+        config = {
+            "status": "running", "seed": self.random_state,
+            "iterations": N, "beta_decay": beta_decay,
+            "train_folds": train_folds, "evaluation_fold": test_fold,
+            "evaluation_role": evaluation_role, "excluded_folds": list(excluded_folds),
+            "initial_dataset_size": len(states),
+            "evaluation_characters": len(self.labels[test_fold]),
+            "classifier": type(self.policy_factory()).__name__,
+            "classifier_params": self.policy_factory().get_params(),
+            "dataset_path": str(Path(self.ocr_path).resolve()),
+            "dataset_sha256": hashlib.sha256(Path(self.ocr_path).read_bytes()).hexdigest(),
+            "source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "python": platform.python_version(), "numpy": np.__version__,
+            "scikit_learn": sklearn.__version__,
+            "timing_note": "Training includes feature stacking; rollout includes aggregation. Elapsed includes setup and logging, excludes plotting.",
+        }
+        def save_config():
+            (run_dir / "config.json").write_text(json.dumps(config, indent=2, default=str), encoding="utf-8")
+        save_config()
+        print(f"Training folds: {train_folds}; {evaluation_role} fold: {test_fold}")
+        print(f"Initial dataset: {len(states)} examples; results: {run_dir}")
+        records = []
+        def record(method, iteration, beta, score, training, rollout, evaluation):
+            row = dict(method=method, iteration=iteration, beta=beta,
+                       accuracy=score, imitation_error=1-score,
+                       dataset_size=len(aggregated_data[0]), seed=self.random_state,
+                       evaluation_fold=test_fold, training_seconds=training,
+                       rollout_seconds=rollout, evaluation_seconds=evaluation,
+                       elapsed_seconds=perf_counter()-started)
+            records.append(row)
+            with (run_dir / "metrics.csv").open("a", newline="", encoding="utf-8") as file:
+                writer = csv.DictWriter(file, fieldnames=list(row))
+                if len(records) == 1:
+                    writer.writeheader()
+                writer.writerow(row)
+            print(f"{method} iteration {iteration}: accuracy={score:.4f}, train={training:.2f}s, rollout={rollout:.2f}s")
+        t = perf_counter()
+        baseline = self._fit_no_structure_policy(states, actions)
+        training = perf_counter()-t
+        t = perf_counter()
+        baseline_score = self.evaluate_no_structure_policy(baseline, test_fold)
+        record("no_structure", 0, 1.0, baseline_score, training, 0.0, perf_counter()-t)
+        self.last_no_structure_policy = baseline
+        self.last_no_structure_score = baseline_score
+        policies, scores = [], []
+        for iteration in range(1, N+1):
+            beta = 1.0 if iteration == 1 else beta_decay ** (iteration-1)
+            rollout = 0.0
+            if iteration > 1:
+                t = perf_counter()
+                self.aggregate_dataset(policies[-1], aggregated_data, test_fold,
+                                       beta=beta, excluded_folds=excluded_folds)
+                rollout = perf_counter()-t
+            t = perf_counter()
+            policy = self._fit_policy(*aggregated_data)
+            training = perf_counter()-t
+            t = perf_counter()
             score = self.evaluate_policy(policy, test_fold)
+            evaluation = perf_counter()-t
+            policies.append(policy)
             scores.append(score)
-            print(
-                f"Iteration {iteration}/{N}: beta={beta:.4f}, "
-                f"free-running character accuracy = {score:.4f}"
-            )
-
+            record("structured_bc" if iteration == 1 else "dagger", iteration,
+                   beta, score, training, rollout, evaluation)
+        self.last_structured_bc_score = scores[0]
+        self.last_run_records = records
+        config.update(status="complete", total_seconds=perf_counter()-started)
+        save_config()
         final_scores = np.asarray(scores)
         if plot:
-            self.plot_scores(
-                final_scores,
-                supervised_score=final_scores[0],
-                no_structure_score=no_structure_score,
-                test_fold=test_fold,
-            )
+            self.plot_scores(final_scores, supervised_score=scores[0],
+                             no_structure_score=baseline_score, test_fold=test_fold)
         return final_scores, policies
 
     @staticmethod
@@ -433,6 +455,7 @@ class DAgger:
         *,
         beta_decay: float = 0.0,
         plot: bool = True,
+        output_dir: str | Path = "results",
     ) -> np.ndarray:
         """Run the paper's large-data protocol, holding out every fold once."""
         fold_scores = []
@@ -445,6 +468,7 @@ class DAgger:
                 test_fold=test_fold,
                 beta_decay=beta_decay,
                 plot=False,
+                output_dir=output_dir,
             )
             fold_scores.append(scores)
             structured_bc_scores.append(scores[0])
@@ -506,23 +530,36 @@ def parse_args() -> argparse.Namespace:
             "as used for the paper's OCR DAgger result."
         ),
     )
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--alpha", type=float, default=1e-4)
+    parser.add_argument("--output-dir", default="results")
+    parser.add_argument("--validation-fold", type=int, choices=range(10),
+                        help="Evaluate on this fold while reserving --test-fold entirely.")
     parser.add_argument("--no-plot", action="store_true")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    dagger = DAgger()
+    if args.all_folds and args.validation_fold is not None:
+        raise SystemExit("--all-folds cannot be combined with --validation-fold.")
+    if args.validation_fold == args.test_fold:
+        raise SystemExit("Validation and test folds must differ.")
+    dagger = DAgger(random_state=args.seed, alpha=args.alpha)
     if args.all_folds:
         dagger.run_cross_validation(
             N=args.iterations,
             beta_decay=args.beta_decay,
             plot=not args.no_plot,
+            output_dir=args.output_dir,
         )
     else:
         scores, trained_policies = dagger.run(
             N=args.iterations,
-            test_fold=args.test_fold,
+            test_fold=args.test_fold if args.validation_fold is None else args.validation_fold,
+            excluded_folds=() if args.validation_fold is None else (args.test_fold,),
+            evaluation_role="test" if args.validation_fold is None else "validation",
             beta_decay=args.beta_decay,
             plot=not args.no_plot,
+            output_dir=args.output_dir,
         )
