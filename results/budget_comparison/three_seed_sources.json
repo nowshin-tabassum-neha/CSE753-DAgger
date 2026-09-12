@@ -1,0 +1,17 @@
+{
+  "standard": [
+    "results\\budget_standard\\20260911T141955_360479Z",
+    "results\\budget_standard\\20260911T161242_898050Z",
+    "results\\budget_standard\\20260911T161943_742839Z"
+  ],
+  "uncertainty": [
+    "results\\budget_uncertainty\\20260911T142223_053386Z",
+    "results\\budget_uncertainty\\20260911T161446_962899Z",
+    "results\\budget_uncertainty\\20260911T162143_322662Z"
+  ],
+  "periodic": [
+    "results\\budget_periodic\\20260911T143845_897719Z",
+    "results\\budget_periodic\\20260911T161807_798811Z",
+    "results\\budget_periodic\\20260911T162538_217187Z"
+  ]
+}

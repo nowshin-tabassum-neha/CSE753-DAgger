@@ -1,0 +1,62 @@
+{
+  "5000_standard": [
+    "results\\budget_5000_standard\\20260911T163833_158507Z",
+    "results\\budget_5000_standard\\20260911T164334_124810Z",
+    "results\\budget_5000_standard\\20260911T164823_161632Z"
+  ],
+  "5000_uncertainty": [
+    "results\\budget_5000_uncertainty\\20260911T164002_904651Z",
+    "results\\budget_5000_uncertainty\\20260911T164453_401330Z",
+    "results\\budget_5000_uncertainty\\20260911T165036_672321Z"
+  ],
+  "5000_periodic": [
+    "results\\budget_5000_periodic\\20260911T164209_784819Z",
+    "results\\budget_5000_periodic\\20260911T164659_343218Z",
+    "results\\budget_5000_periodic\\20260911T165257_988422Z"
+  ],
+  "10000_standard": [
+    "results\\budget_standard\\20260911T141955_360479Z",
+    "results\\budget_standard\\20260911T161242_898050Z",
+    "results\\budget_standard\\20260911T161943_742839Z"
+  ],
+  "10000_uncertainty": [
+    "results\\budget_uncertainty\\20260911T142223_053386Z",
+    "results\\budget_uncertainty\\20260911T161446_962899Z",
+    "results\\budget_uncertainty\\20260911T162143_322662Z"
+  ],
+  "10000_periodic": [
+    "results\\budget_periodic\\20260911T143845_897719Z",
+    "results\\budget_periodic\\20260911T161807_798811Z",
+    "results\\budget_periodic\\20260911T162538_217187Z"
+  ],
+  "15000_standard": [
+    "results\\budget_15000_standard\\20260911T165427_089651Z",
+    "results\\budget_15000_standard\\20260911T170236_011750Z",
+    "results\\budget_15000_standard\\20260911T171123_485659Z"
+  ],
+  "15000_uncertainty": [
+    "results\\budget_15000_uncertainty\\20260911T165618_934350Z",
+    "results\\budget_15000_uncertainty\\20260911T170444_064551Z",
+    "results\\budget_15000_uncertainty\\20260911T171335_344517Z"
+  ],
+  "15000_periodic": [
+    "results\\budget_15000_periodic\\20260911T165950_608557Z",
+    "results\\budget_15000_periodic\\20260911T170816_690597Z",
+    "results\\budget_15000_periodic\\20260911T171726_145235Z"
+  ],
+  "20000_standard": [
+    "results\\budget_20000_standard\\20260911T172010_881080Z",
+    "results\\budget_20000_standard\\20260911T172836_153897Z",
+    "results\\budget_20000_standard\\20260911T173708_475693Z"
+  ],
+  "20000_uncertainty": [
+    "results\\budget_20000_uncertainty\\20260911T172215_612885Z",
+    "results\\budget_20000_uncertainty\\20260911T173047_063296Z",
+    "results\\budget_20000_uncertainty\\20260911T173909_323944Z"
+  ],
+  "20000_periodic": [
+    "results\\budget_20000_periodic\\20260911T172546_435092Z",
+    "results\\budget_20000_periodic\\20260911T173422_780344Z",
+    "results\\budget_20000_periodic\\20260911T174254_563398Z"
+  ]
+}
