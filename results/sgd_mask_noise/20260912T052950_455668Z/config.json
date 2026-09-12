@@ -1,5 +1,5 @@
 {
-  "status": "running",
+  "status": "complete",
   "seed": 0,
   "iterations": 5,
   "beta_decay": 0.0,
@@ -63,5 +63,6 @@
   "corruption_order": "Gaussian noise, clip to [0,1], random zero masking",
   "mask_indicator": false,
   "memory_policy": false,
-  "observation_source_sha256": "120f9377af5d9f888d883ff5e3b920a84e168f7521ab8beff10dd0cb0d34222f"
+  "observation_source_sha256": "120f9377af5d9f888d883ff5e3b920a84e168f7521ab8beff10dd0cb0d34222f",
+  "total_seconds": 250.72731680000015
 }
